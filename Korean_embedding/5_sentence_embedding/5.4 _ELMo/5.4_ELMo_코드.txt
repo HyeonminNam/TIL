@@ -1,0 +1,98 @@
+docker pull ratsgo/embedding-gpu
+docker run -it --rm --gpus all ratsgo/embedding-gpu bash
+
+## 5.4.4 프리트레인 튜토리얼
+- 프리트레인에서는 문자 단위 컨볼루션 레이어와 양방향 LSTM, 레이어만을 학습
+
+1) 데이터 준비
+- ELMo 모델을 프리트레이닝하기 위해서는 형태소 분석이 완료된 데이터가 필요
+- 튜토리얼에서는 Mecab으로 토크나이즈한 한국어 위키백과, 네이버 영화 리뷰 말뭉치, KorQuAD 데이터 세개를 합쳐 사용
+- 효율적 학습을 위해 말뭉치를 10만 개 라인으로 나누어줌
+
+#코드 5-28 학습 데이터 준비(bash)
+git pull origin master
+bash preprocess.sh dump-tokenized
+cd /notebooks/embedding
+mkdir -p data/sentence-embeddings/elmo/pretrain-ckpt/traindata
+cat data/tokenized/wiki_ko_mecab.txt data/tokenized/ratings_mecab.txt data/tokenized/korquad_mecab.txt > data/tokenized/corpus_mecab.txt
+split -l 100000 data/tokenized/corpus_mecab.txt data/sentence-embeddings/elmo/pretrain-ckpt/traindata/data_
+
+- 프리트레인 위해서는 어휘 집합 필요
+    - 어휘 집합이 쓰이는 경우는 프리트레인 입력 단계와 프리트레인 예측 단계
+    - 프리트레인 입력 단계에서의 어휘 집합 활용
+        - 프리트레이닝 과정에서 매 스텝마다 다량의 문서를 문자 단위 정수 ID 시퀀스 형태로 변환하는 것은 비효율적
+        - ELMo 모델은 프리트레이닝을 시작하기 전에 어휘 집합에 포함된 각 단어를 모두 문자 단위 ID 시퀀스로 미리 변환
+        - 문장 내 단어들이 미리 만들어 놓은 리스트에 포함되어 있으면 꺼내어 쓰고, 없으면 새롭게 ID 시퀀스로 변환하여 활용
+    - 프리트레인 예측 단계에서의 어휘 집합 활용
+        - ELMo 모델은 주어진 단어 시퀀스 다음의 단어를 맞추는 과정에서 학습
+        - 즉, 예측 결과(출력)가 단어
+        - 문자 시퀀스를 입력으로 받은 뒤 단어를 출력해야 함으로 어휘 집합이 반드시 필요
+
+#코드 5-29 ELMo 어휘 집합 구축(bash)
+cd /notebooks/embedding
+python models/sent_utils.py --method construct_elmo_vocab \
+    --input_path data/tokenized/corpus_mecab.txt \
+    --output_path data/sentence-embeddings/elmo/pretrain-ckpt/elmo-vocab.txt
+
+
+2) 하이퍼파라미터 설정
+- ELMo 모델의 하이퍼파라미터는 크게 문자 단위 컨볼루션 레이어, 양방향 LSTM 레이어 두개로 나누어 생각할 수 있음
+- 문자 단위 컨볼루션 레이어는 char_cnn, 양뱡향 LSTM 레이어는 lstm 부분에서 하이퍼파라미터 설정할 수 있음
+- 아래 하이퍼파라미터들은 ELMo 기본 모델 대비 차원 수나 레이어 수를 줄인 커스텀 모델
+
+#코드 5-30 ELMo 하이퍼파라미터 설정(/notebooks/embedding/models/train_elmo.py 일부)
+options = {
+	'bidirectional' : True, # 양방향 LSTM 레이어 적용 여부
+	'char_cnn' : {'activation' : 'relu', # 컨볼루션 필터 가중치 초기화, 맥스 풀링 이후 활성화 함수(relu or tanh)
+								'embedding': {'dim' : 16}, # 문자별 임베딩 행렬의 차원 수
+								'filters': [[1, 32], # [문자 몇 개씩 볼지, 필터 수]
+														[2, 32],
+														[3, 64],
+														[4, 128],
+														[5, 256],
+														[6, 512],
+														[7, 1024]],
+								'max_characters_per_token' : 30, # 한 토큰에 최대 몇 개의 문자 입력할지
+								'n_characters' : 261, # 사용하는 문자 종류 개수(유니코드 ID 수, 261개 고정)
+								'n_highway' : 2}, # 하이웨이 네트워크 적용 횟수
+	'dropout' : 0.1, # 드롭아웃 비율
+	
+	'lstm' : {
+		'cell_clip' : 3, # LSTM 셀의 값의 제한 크기, 그래디언트 문제 막기 위함
+		'dim' : 1024, # 셀의 입출력 벡터 차원 수
+		'n_layers' : 2, # 양방향 LSTM 레이어의 개수
+		'proj_clip' : 3, # LSTM 셀의 값의 제한 크기, 그래디언트 문제 막기 위함
+		'projection_dim' : 128, # 셀의 입출력 벡터 차원 수
+		'use_skip_connections' : True}, # 레이어와 레이어 사이를 건너뛰는 커넥션 유무
+
+	'all_clip_norm_val' : 10.0, # 역전파 그래디언트 크기
+
+	'n_epochs' : 10, # 에폭 수
+	'n_train_tokens' : n_train_tokens, # 에폭 수를 정할 때 참고하는 데이터 크기(전체 토큰 수)
+	'batch_size' : 128, # 배치 데이터 크기
+	'n_tokens_vocab': 100000, # 어휘 집합 크기
+	'unroll_steps' : 20, # 몇 개의 단어 시퀀스 예측할지
+	'n_negative_samples_batch' : 8192, # 한 스텝에서 계산하는 네거티브 샘플 개수
+}
+
+
+3) ELMo 프리트레이닝 및 모델 저장
+- 아래 코드를 통해서 ELMo 프리트레이닝 시작할 수 있음
+- 정해진 에폭이 다 돌 때까지 백그라운드에서 학습하며 log 파일에 학습 과정이 기록됨
+- ELMo 모델은 GPU 환경에서만 프리트레인할 수 있음
+
+#코드 5-31 ELMo 프리트레이닝(bash)
+cd /notebooks/embedding
+nohup sh -c "python models/train_emlp.py --train_prefix 'data/sentence-embeddings/elmo/pretrain-ckpt/traindata/* 
+--vocab_file data/sentence-embeddings/elmo/pretrain-ckpt/elmo-vocab.txt --save_dir data/sentence-embeddings/elmo/pretrain-ckpt 
+--n_gpus 1" > elmo-pretrain.log &
+
+- 학습이 완료되면 모델의 파라미터 등이 기록된 체크포인트 파일이 save_dir에 저장
+- 체크포인트 파일이 있는 상태에서 코드 5-32를 실행하면 파인 튜닝을 할 수 있는 파일 형태(h5)로 저장할 수 있음
+- ELMo 레이어에 대한 파인 튜닝은 6장을 참고
+
+#코드 5-32 ELMo 모델 저장(bash)
+cd /notebooks/embedding
+python models/sent_utils.py --metohod dump_elmo_weights \
+--input_path data/sentence-embeddings/elmo/pretrain-ckpt \
+--output_path data/sentence-embeddings/elmo/pretrain-ckpt/elmo.model
