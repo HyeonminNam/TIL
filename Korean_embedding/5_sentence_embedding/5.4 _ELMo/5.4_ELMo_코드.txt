@@ -83,9 +83,11 @@ options = {
 
 #코드 5-31 ELMo 프리트레이닝(bash)
 cd /notebooks/embedding
-nohup sh -c "python models/train_emlp.py --train_prefix 'data/sentence-embeddings/elmo/pretrain-ckpt/traindata/* 
+nohup sh -c "python models/train_elmo.py --train_prefix 'data/sentence-embeddings/elmo/pretrain-ckpt/traindata/*' 
 --vocab_file data/sentence-embeddings/elmo/pretrain-ckpt/elmo-vocab.txt --save_dir data/sentence-embeddings/elmo/pretrain-ckpt 
 --n_gpus 1" > elmo-pretrain.log &
+
+python models/train_elmo.py --train_prefix 'data/sentence-embeddings/elmo/pretrain-ckpt/traindata/*' --vocab_file data/sentence-embeddings/elmo/pretrain-ckpt/elmo-vocab.txt --save_dir data/sentence-embeddings/elmo/pretrain-ckpt --n_gpus 1
 
 - 학습이 완료되면 모델의 파라미터 등이 기록된 체크포인트 파일이 save_dir에 저장
 - 체크포인트 파일이 있는 상태에서 코드 5-32를 실행하면 파인 튜닝을 할 수 있는 파일 형태(h5)로 저장할 수 있음
@@ -93,6 +95,6 @@ nohup sh -c "python models/train_emlp.py --train_prefix 'data/sentence-embedding
 
 #코드 5-32 ELMo 모델 저장(bash)
 cd /notebooks/embedding
-python models/sent_utils.py --metohod dump_elmo_weights \
+python models/sent_utils.py --method dump_elmo_weights \
 --input_path data/sentence-embeddings/elmo/pretrain-ckpt \
 --output_path data/sentence-embeddings/elmo/pretrain-ckpt/elmo.model
